@@ -1,0 +1,494 @@
+# =============================================================================
+# Pill Dispenser — ESPHome firmware
+#
+# ESP32 controls a 9-compartment rotating drum (revolver-style) with a gate
+# disk for single-pill metering. Hardware:
+#   - Stepper motor (A4988/DRV8825 driver) — rotates drum to next compartment
+#   - IR break-beam sensor — counts pills as they fall through the gate chute
+#   - Hall effect sensor + magnet on drum rim — home-position index
+#   - Buzzer + status LED — dispense confirmation feedback
+#
+# Position model:
+#   - DRUM_COMPARTMENTS = 9, so each compartment is 360°/9 = 40° apart.
+#   - Stepper is 200 steps/rev (1.8°/step), microstepping 1/16 → 3200 steps/rev.
+#   - Steps per compartment = 3200 / 9 ≈ 355.56 → rounded to 356 (drift is
+#     re-zeroed on each home cycle so accumulation is bounded).
+#   - "Current compartment" is the one currently aligned with the gate slot.
+#     Home = compartment 1.
+# =============================================================================
+
+substitutions:
+  device_name: pill-dispenser
+  friendly_name: "Pill Dispenser"
+
+  # ---- GPIO pin map (ESP32 DevKit C V4) -------------------------------------
+  # Stepper driver (A4988/DRV8825-style)
+  pin_stepper_step: GPIO25
+  pin_stepper_dir: GPIO26
+  pin_stepper_enable: GPIO27   # active-LOW on most drivers (sleep when HIGH)
+  # IR break-beam (active-LOW: beam intact = HIGH, pill blocks = LOW pulse)
+  pin_ir_beam: GPIO32
+  # Hall effect sensor (active-LOW digital, e.g. A3144: LOW when magnet present)
+  pin_hall: GPIO33
+  # Feedback
+  pin_buzzer: GPIO14
+  pin_led: GPIO2               # on-board LED on most ESP32 dev kits
+
+  # ---- Motion tuning --------------------------------------------------------
+  steps_per_compartment: "356"   # 3200 microsteps / 9 compartments, rounded
+  homing_max_steps: "4000"       # ~1.25 revolutions — guaranteed to see magnet
+  stepper_max_speed: "800"       # steps/sec
+  stepper_acceleration: "1500"   # steps/sec²
+  stepper_deceleration: "1500"   # steps/sec²
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: -100
+    then:
+      # Home the drum on every boot so position is always trustworthy.
+      - logger.log: "Boot — homing drum"
+      - script.execute: home_drum
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+
+logger:
+
+api:
+  reboot_timeout: 0min
+
+ota:
+  - platform: esphome
+
+wifi:
+  ap:
+    ssid: "${friendly_name} Fallback"
+
+captive_portal:
+
+# =============================================================================
+# Globals
+# =============================================================================
+globals:
+  # Which compartment (1..9) is currently at the gate. 0 = unknown (pre-home).
+  - id: current_compartment
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # IR pill count for the current dispense operation.
+  - id: pills_dispensed_count
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # True while a dispense / homing sequence is running — prevents overlap.
+  - id: dispense_busy
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+# =============================================================================
+# Stepper
+# =============================================================================
+stepper:
+  - platform: a4988
+    id: drum_stepper
+    step_pin: ${pin_stepper_step}
+    dir_pin: ${pin_stepper_dir}
+    sleep_pin:
+      number: ${pin_stepper_enable}
+      inverted: true     # driver enable is active-LOW
+    max_speed: ${stepper_max_speed} steps/s
+    acceleration: ${stepper_acceleration} steps/s^2
+    deceleration: ${stepper_deceleration} steps/s^2
+
+# =============================================================================
+# Binary sensors
+# =============================================================================
+binary_sensor:
+  # Hall effect — magnet on drum rim is positioned between compartments 9 and 1.
+  # When this reads ON, the drum is at the home index.
+  - platform: gpio
+    id: hall_home
+    name: "Drum Homed"
+    pin:
+      number: ${pin_hall}
+      mode: INPUT_PULLUP
+      inverted: true   # active-LOW sensor → ON means magnet detected
+    filters:
+      - delayed_on: 5ms
+      - delayed_off: 20ms
+
+  # IR break-beam — each falling pill briefly breaks the beam.
+  # We don't expose this as a sensor in HA (too noisy); we count it in firmware.
+  - platform: gpio
+    id: ir_beam
+    pin:
+      number: ${pin_ir_beam}
+      mode: INPUT_PULLUP
+      inverted: true   # beam blocked → reads ON (pill present)
+    filters:
+      # Debounce: pills typically block the beam for 20–80ms as they fall.
+      - delayed_on: 3ms
+      - delayed_off: 10ms
+    internal: true
+    on_press:
+      then:
+        - lambda: |-
+            id(pills_dispensed_count) += 1;
+            id(pills_dispensed).publish_state(id(pills_dispensed_count));
+        # Short feedback chirp per pill (50ms)
+        - if:
+            condition:
+              switch.is_off: buzzer_mute
+            then:
+              - output.turn_on: buzzer_out
+              - delay: 50ms
+              - output.turn_off: buzzer_out
+
+# =============================================================================
+# Outputs (buzzer + LED)
+# =============================================================================
+output:
+  - platform: gpio
+    pin: ${pin_buzzer}
+    id: buzzer_out
+  - platform: gpio
+    pin: ${pin_led}
+    id: led_out
+
+# Software mute for the per-pill chirp (lets users silence at night).
+switch:
+  - platform: template
+    name: "Buzzer Mute"
+    id: buzzer_mute
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+
+# =============================================================================
+# Sensors (exposed to HA)
+# =============================================================================
+sensor:
+  - platform: template
+    name: "Pills Dispensed"
+    id: pills_dispensed
+    accuracy_decimals: 0
+    icon: "mdi:counter"
+    unit_of_measurement: "pills"
+    update_interval: never
+
+  - platform: template
+    name: "Current Compartment"
+    id: current_compartment_sensor
+    accuracy_decimals: 0
+    icon: "mdi:numeric"
+    update_interval: never
+    lambda: |-
+      return id(current_compartment);
+
+# =============================================================================
+# Number — pills expected per dose (used for verification mismatch alert)
+# =============================================================================
+number:
+  - platform: template
+    name: "Pills Per Dose"
+    id: pills_per_dose
+    icon: "mdi:pill"
+    optimistic: true
+    restore_value: true
+    initial_value: 1
+    min_value: 1
+    max_value: 30
+    step: 1
+    mode: box
+
+# =============================================================================
+# Text sensor — last verification status (OK / mismatch)
+# =============================================================================
+text_sensor:
+  - platform: template
+    name: "Last Dispense Status"
+    id: last_dispense_status
+    icon: "mdi:check-circle"
+    update_interval: never
+
+# =============================================================================
+# Scripts — homing, advancing, dispensing
+# =============================================================================
+script:
+  # ---- Home the drum --------------------------------------------------------
+  # Rotates in the forward direction until the hall sensor fires, then declares
+  # that position to be compartment 1. If the sensor is already triggered at
+  # the start, we nudge off it first so we register a clean edge.
+  - id: home_drum
+    mode: single
+    then:
+      - lambda: |-
+          id(dispense_busy) = true;
+      - output.turn_on: led_out
+      - logger.log: "Homing: rotating until hall sensor triggers"
+
+      # If we're already on the magnet, step off it first.
+      - if:
+          condition:
+            binary_sensor.is_on: hall_home
+          then:
+            - stepper.set_target:
+                id: drum_stepper
+                target: !lambda 'return id(drum_stepper).current_position + 200;'
+            - wait_until:
+                lambda: 'return id(drum_stepper).current_position == id(drum_stepper).target_position;'
+
+      # Sweep forward up to one+ full revolution looking for the magnet.
+      - stepper.set_target:
+          id: drum_stepper
+          target: !lambda 'return id(drum_stepper).current_position + ${homing_max_steps};'
+      - wait_until:
+          lambda: |-
+            return id(hall_home).state ||
+                   id(drum_stepper).current_position == id(drum_stepper).target_position;
+      # Stop motion immediately at the trigger point.
+      - stepper.set_target:
+          id: drum_stepper
+          target: !lambda 'return id(drum_stepper).current_position;'
+
+      - lambda: |-
+          if (id(hall_home).state) {
+            id(drum_stepper).report_position(0);
+            id(drum_stepper).set_target(0);
+            id(current_compartment) = 1;
+            id(current_compartment_sensor).publish_state(1);
+            ESP_LOGI("home", "Homed — compartment 1 at gate");
+          } else {
+            ESP_LOGE("home", "Homing failed — hall sensor never triggered");
+            id(current_compartment) = 0;
+            id(current_compartment_sensor).publish_state(0);
+          }
+      - output.turn_off: led_out
+      - lambda: |-
+          id(dispense_busy) = false;
+
+  # ---- Advance to a specific compartment ------------------------------------
+  # Takes the shorter rotational direction. Updates current_compartment.
+  # Parameter: target (int, 1..9)
+  - id: goto_compartment
+    mode: single
+    parameters:
+      target: int
+    then:
+      - if:
+          condition:
+            lambda: 'return id(current_compartment) == 0;'
+          then:
+            - logger.log: "Position unknown — running home first"
+            - script.execute: home_drum
+            - script.wait: home_drum
+
+      - lambda: |-
+          int from = id(current_compartment);
+          int to = target;
+          if (to < 1 || to > 9) {
+            ESP_LOGW("goto", "Invalid compartment %d", to);
+            return;
+          }
+          // Shortest signed delta in compartments, range [-4, 4]
+          int delta = to - from;
+          while (delta > 4) delta -= 9;
+          while (delta < -4) delta += 9;
+          int step_delta = delta * ${steps_per_compartment};
+          int new_target = id(drum_stepper).current_position + step_delta;
+          ESP_LOGI("goto", "Moving from %d to %d (delta=%d, steps=%d)", from, to, delta, step_delta);
+          id(drum_stepper).set_target(new_target);
+      - wait_until:
+          lambda: 'return id(drum_stepper).current_position == id(drum_stepper).target_position;'
+      - lambda: |-
+          id(current_compartment) = target;
+          id(current_compartment_sensor).publish_state(target);
+
+  # ---- Dispense from the compartment currently at the gate ------------------
+  # Counts IR pulses during a dispense window, then verifies against pills_per_dose.
+  - id: dispense_current
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(dispense_busy);'
+          then:
+            - logger.log: "Dispense already in progress — ignoring"
+          else:
+            - lambda: |-
+                id(dispense_busy) = true;
+                id(pills_dispensed_count) = 0;
+                id(pills_dispensed).publish_state(0);
+            - output.turn_on: led_out
+
+            # Pill drop window — the gate cycle in hardware (gate disk
+            # rotating LOAD↔DROP) is mechanical and not driven here; this
+            # script just observes the IR sensor for the dispense interval.
+            # 2.5s is enough for ~10 pills at typical fall rate.
+            - delay: 2500ms
+
+            - output.turn_off: led_out
+            - lambda: |-
+                int got = id(pills_dispensed_count);
+                int want = (int) id(pills_per_dose).state;
+                if (got == want) {
+                  id(last_dispense_status).publish_state("OK");
+                  ESP_LOGI("disp", "Dispensed %d pills (expected %d)", got, want);
+                } else {
+                  char buf[48];
+                  snprintf(buf, sizeof(buf), "MISMATCH: got %d, expected %d", got, want);
+                  id(last_dispense_status).publish_state(buf);
+                  ESP_LOGW("disp", "%s", buf);
+                }
+                id(dispense_busy) = false;
+
+            # End-of-dispense confirmation: double chirp on OK, long beep on mismatch.
+            - if:
+                condition:
+                  switch.is_off: buzzer_mute
+                then:
+                  - if:
+                      condition:
+                        lambda: 'return id(pills_dispensed_count) == (int) id(pills_per_dose).state;'
+                      then:
+                        - output.turn_on: buzzer_out
+                        - delay: 100ms
+                        - output.turn_off: buzzer_out
+                        - delay: 100ms
+                        - output.turn_on: buzzer_out
+                        - delay: 100ms
+                        - output.turn_off: buzzer_out
+                      else:
+                        - output.turn_on: buzzer_out
+                        - delay: 600ms
+                        - output.turn_off: buzzer_out
+
+  # ---- Advance to next compartment and dispense -----------------------------
+  - id: dispense_next
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return id(current_compartment) == 0;'
+          then:
+            - script.execute: home_drum
+            - script.wait: home_drum
+      - script.execute:
+          id: goto_compartment
+          target: !lambda 'return id(current_compartment) % 9 + 1;'
+      - script.wait: goto_compartment
+      - script.execute: dispense_current
+
+# =============================================================================
+# Buttons exposed to Home Assistant
+# =============================================================================
+button:
+  - platform: template
+    name: "Dispense Next"
+    id: btn_dispense_next
+    icon: "mdi:skip-next"
+    on_press:
+      - script.execute: dispense_next
+
+  - platform: template
+    name: "Home Drum"
+    id: btn_home
+    icon: "mdi:home"
+    on_press:
+      - script.execute: home_drum
+
+  - platform: template
+    name: "Dispense Compartment 1"
+    icon: "mdi:numeric-1-circle"
+    on_press:
+      - script.execute:
+          id: goto_compartment
+          target: 1
+      - script.wait: goto_compartment
+      - script.execute: dispense_current
+
+  - platform: template
+    name: "Dispense Compartment 2"
+    icon: "mdi:numeric-2-circle"
+    on_press:
+      - script.execute:
+          id: goto_compartment
+          target: 2
+      - script.wait: goto_compartment
+      - script.execute: dispense_current
+
+  - platform: template
+    name: "Dispense Compartment 3"
+    icon: "mdi:numeric-3-circle"
+    on_press:
+      - script.execute:
+          id: goto_compartment
+          target: 3
+      - script.wait: goto_compartment
+      - script.execute: dispense_current
+
+  - platform: template
+    name: "Dispense Compartment 4"
+    icon: "mdi:numeric-4-circle"
+    on_press:
+      - script.execute:
+          id: goto_compartment
+          target: 4
+      - script.wait: goto_compartment
+      - script.execute: dispense_current
+
+  - platform: template
+    name: "Dispense Compartment 5"
+    icon: "mdi:numeric-5-circle"
+    on_press:
+      - script.execute:
+          id: goto_compartment
+          target: 5
+      - script.wait: goto_compartment
+      - script.execute: dispense_current
+
+  - platform: template
+    name: "Dispense Compartment 6"
+    icon: "mdi:numeric-6-circle"
+    on_press:
+      - script.execute:
+          id: goto_compartment
+          target: 6
+      - script.wait: goto_compartment
+      - script.execute: dispense_current
+
+  - platform: template
+    name: "Dispense Compartment 7"
+    icon: "mdi:numeric-7-circle"
+    on_press:
+      - script.execute:
+          id: goto_compartment
+          target: 7
+      - script.wait: goto_compartment
+      - script.execute: dispense_current
+
+  - platform: template
+    name: "Dispense Compartment 8"
+    icon: "mdi:numeric-8-circle"
+    on_press:
+      - script.execute:
+          id: goto_compartment
+          target: 8
+      - script.wait: goto_compartment
+      - script.execute: dispense_current
+
+  - platform: template
+    name: "Dispense Compartment 9"
+    icon: "mdi:numeric-9-circle"
+    on_press:
+      - script.execute:
+          id: goto_compartment
+          target: 9
+      - script.wait: goto_compartment
+      - script.execute: dispense_current
