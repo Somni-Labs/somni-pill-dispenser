@@ -32,7 +32,7 @@ substitutions:
   pin_hall: GPIO33
   # Feedback
   pin_buzzer: GPIO14
-  pin_led: GPIO2               # on-board LED on most ESP32 dev kits
+  pin_led: GPIO16              # external status LED — GPIO16 has no strapping/boot constraints
 
   # ---- Motion tuning --------------------------------------------------------
   steps_per_compartment: "356"   # 3200 microsteps / 9 compartments, rounded
