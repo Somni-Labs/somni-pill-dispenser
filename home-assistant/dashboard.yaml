@@ -1,0 +1,367 @@
+# =============================================================================
+# Pill Dispenser — Lovelace dashboard card
+#
+# Paste this into the Lovelace raw editor (or add to a YAML-mode dashboard).
+# Uses only built-in HA cards — no HACS dependencies.
+#
+# Layout (top → bottom):
+#   1. Header with current compartment + drum-homed status.
+#   2. Drum position visualizer — 9 chips arranged in a 3×3 grid, the active
+#      compartment is filled-in; spent compartments are dimmed; future
+#      compartments are outlined.
+#   3. Big "Dispense Now" button.
+#   4. Last dispense info — time, pill count, OK/mismatch status.
+#   5. Refill summary — compartments remaining + "Mark Refilled" action.
+#   6. Schedule controls — morning/evening time + enable toggles.
+# =============================================================================
+
+type: vertical-stack
+title: Pill Dispenser
+cards:
+  # ---- 1 + 2: Current compartment + visualizer ----------------------------
+  - type: vertical-stack
+    cards:
+      - type: glance
+        show_name: true
+        show_state: true
+        columns: 2
+        entities:
+          - entity: sensor.pill_dispenser_current_compartment
+            name: Current compartment
+            icon: mdi:target
+          - entity: binary_sensor.pill_dispenser_drum_homed
+            name: Homed
+
+      - type: grid
+        columns: 3
+        square: true
+        cards:
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state: "1"
+            card:
+              type: button
+              name: "1"
+              icon: mdi:circle-slice-8
+              entity: sensor.pill_dispenser_current_compartment
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_1
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state_not: "1"
+            card:
+              type: button
+              name: "1"
+              icon: mdi:circle-outline
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_1
+
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state: "2"
+            card:
+              type: button
+              name: "2"
+              icon: mdi:circle-slice-8
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_2
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state_not: "2"
+            card:
+              type: button
+              name: "2"
+              icon: mdi:circle-outline
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_2
+
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state: "3"
+            card:
+              type: button
+              name: "3"
+              icon: mdi:circle-slice-8
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_3
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state_not: "3"
+            card:
+              type: button
+              name: "3"
+              icon: mdi:circle-outline
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_3
+
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state: "4"
+            card:
+              type: button
+              name: "4"
+              icon: mdi:circle-slice-8
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_4
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state_not: "4"
+            card:
+              type: button
+              name: "4"
+              icon: mdi:circle-outline
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_4
+
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state: "5"
+            card:
+              type: button
+              name: "5"
+              icon: mdi:circle-slice-8
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_5
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state_not: "5"
+            card:
+              type: button
+              name: "5"
+              icon: mdi:circle-outline
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_5
+
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state: "6"
+            card:
+              type: button
+              name: "6"
+              icon: mdi:circle-slice-8
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_6
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state_not: "6"
+            card:
+              type: button
+              name: "6"
+              icon: mdi:circle-outline
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_6
+
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state: "7"
+            card:
+              type: button
+              name: "7"
+              icon: mdi:circle-slice-8
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_7
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state_not: "7"
+            card:
+              type: button
+              name: "7"
+              icon: mdi:circle-outline
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_7
+
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state: "8"
+            card:
+              type: button
+              name: "8"
+              icon: mdi:circle-slice-8
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_8
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state_not: "8"
+            card:
+              type: button
+              name: "8"
+              icon: mdi:circle-outline
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_8
+
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state: "9"
+            card:
+              type: button
+              name: "9"
+              icon: mdi:circle-slice-8
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_9
+          - type: conditional
+            conditions:
+              - entity: sensor.pill_dispenser_current_compartment
+                state_not: "9"
+            card:
+              type: button
+              name: "9"
+              icon: mdi:circle-outline
+              tap_action:
+                action: call-service
+                service: button.press
+                target:
+                  entity_id: button.pill_dispenser_dispense_compartment_9
+
+  # ---- 3: Dispense + Home buttons ----------------------------------------
+  - type: horizontal-stack
+    cards:
+      - type: button
+        name: Dispense Now
+        icon: mdi:pill
+        icon_height: 48px
+        show_state: false
+        tap_action:
+          action: call-service
+          service: script.pill_dispenser_dispense_now
+      - type: button
+        name: Home Drum
+        icon: mdi:home-search
+        icon_height: 48px
+        show_state: false
+        tap_action:
+          action: call-service
+          service: button.press
+          target:
+            entity_id: button.pill_dispenser_home_drum
+
+  # ---- 4: Last dispense ---------------------------------------------------
+  - type: entities
+    title: Last dispense
+    show_header_toggle: false
+    entities:
+      - entity: input_datetime.pill_dispenser_last_dispense_at
+        name: When
+        icon: mdi:clock-check
+      - entity: sensor.pill_dispenser_pills_dispensed
+        name: Pill count
+        icon: mdi:counter
+      - entity: sensor.pill_dispenser_last_dispense_status
+        name: Verification
+        icon: mdi:check-circle
+      - entity: number.pill_dispenser_pills_per_dose
+        name: Expected per dose
+        icon: mdi:pill
+      - entity: input_boolean.pill_dispenser_dose_pending_ack
+        name: Awaiting acknowledgement
+      - type: call-service
+        name: Acknowledge dose
+        icon: mdi:check-bold
+        action_name: Mark taken
+        service: script.pill_dispenser_acknowledge_dose
+
+  # ---- 5: Refill ---------------------------------------------------------
+  - type: entities
+    title: Refill
+    show_header_toggle: false
+    entities:
+      - entity: sensor.pill_dispenser_compartments_remaining
+        name: Compartments remaining
+        icon: mdi:tray-full
+      - entity: sensor.pill_dispenser_needs_refill
+        name: Refill needed?
+        icon: mdi:tray-alert
+      - entity: input_number.pill_dispenser_last_refill_compartment
+        name: Last refilled up to
+        icon: mdi:tray-plus
+      - type: call-service
+        name: Mark fully refilled
+        icon: mdi:tray-full
+        action_name: Refill done
+        service: input_number.set_value
+        service_data:
+          entity_id: input_number.pill_dispenser_last_refill_compartment
+          value: 9
+
+  # ---- 6: Schedule -------------------------------------------------------
+  - type: entities
+    title: Schedule
+    show_header_toggle: false
+    entities:
+      - entity: input_boolean.pill_dispenser_morning_enabled
+        name: Morning dose enabled
+      - entity: input_datetime.pill_dispenser_morning_time
+        name: Morning dose at
+      - entity: input_boolean.pill_dispenser_evening_enabled
+        name: Evening dose enabled
+      - entity: input_datetime.pill_dispenser_evening_time
+        name: Evening dose at
+      - entity: switch.pill_dispenser_buzzer_mute
+        name: Mute buzzer
