@@ -1,0 +1,330 @@
+# =============================================================================
+# Pill Dispenser — Home Assistant package
+#
+# Bundles helpers, scripts, and automations for the ESPHome pill-dispenser
+# device. Drop this file into /config/packages/ (or wherever your `packages:`
+# include points) and reload HA. The dashboard card lives separately in
+# dashboard.yaml — paste it into Lovelace via "Edit dashboard → raw editor"
+# or add it to a Lovelace YAML mode config.
+#
+# Firmware entities expected (see esphome/pill-dispenser.yaml):
+#   sensor.pill_dispenser_current_compartment      — 1..9, 0 if unhomed
+#   sensor.pill_dispenser_pills_dispensed          — count from last dispense
+#   sensor.pill_dispenser_last_dispense_status     — "OK" / "MISMATCH: …"
+#   binary_sensor.pill_dispenser_drum_homed        — magnet detected
+#   number.pill_dispenser_pills_per_dose           — expected pills per dose
+#   button.pill_dispenser_dispense_next            — advance + dispense
+#   button.pill_dispenser_home_drum                — re-home the drum
+#
+# Refill model:
+#   The dispenser walks 1 → 2 → … → 9 → 1. We treat each compartment as
+#   "consumed" once it's been dispensed. `input_number.pill_dispenser_last_refill_compartment`
+#   tracks the most recently filled compartment (default 9 — assumes all 9
+#   are filled at refill time). Compartments remaining = positions between
+#   `current_compartment` and `last_refill_compartment` going forward.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Helpers — datetimes, booleans, numbers used by the automations.
+# -----------------------------------------------------------------------------
+input_datetime:
+  pill_dispenser_morning_time:
+    name: Pill Dispenser Morning Dose Time
+    has_date: false
+    has_time: true
+    initial: "08:00:00"
+    icon: mdi:weather-sunny
+
+  pill_dispenser_evening_time:
+    name: Pill Dispenser Evening Dose Time
+    has_date: false
+    has_time: true
+    initial: "20:00:00"
+    icon: mdi:weather-night
+
+  pill_dispenser_last_dispense_at:
+    name: Pill Dispenser Last Dispense At
+    has_date: true
+    has_time: true
+    icon: mdi:clock-check
+
+input_boolean:
+  pill_dispenser_morning_enabled:
+    name: Pill Dispenser Morning Dose Enabled
+    icon: mdi:weather-sunny
+    initial: true
+
+  pill_dispenser_evening_enabled:
+    name: Pill Dispenser Evening Dose Enabled
+    icon: mdi:weather-night
+    initial: false
+
+  pill_dispenser_dose_pending_ack:
+    name: Pill Dispenser Dose Pending Acknowledgement
+    icon: mdi:bell-alert
+    initial: false
+
+input_number:
+  pill_dispenser_last_refill_compartment:
+    name: Pill Dispenser Last Refill Compartment
+    icon: mdi:tray-full
+    min: 1
+    max: 9
+    step: 1
+    initial: 9
+    mode: box
+
+# -----------------------------------------------------------------------------
+# Derived sensors — compartments remaining before refill is needed.
+# -----------------------------------------------------------------------------
+template:
+  - sensor:
+      - name: "Pill Dispenser Compartments Remaining"
+        unique_id: pill_dispenser_compartments_remaining
+        icon: mdi:numeric
+        unit_of_measurement: "compartments"
+        state: >
+          {% set cur = states('sensor.pill_dispenser_current_compartment') | int(0) %}
+          {% set last = states('input_number.pill_dispenser_last_refill_compartment') | int(9) %}
+          {% if cur == 0 %}
+            unknown
+          {% else %}
+            {# Compartments that still contain pills are cur..last walking forward,
+               wrapping 9→1. last itself is the final one with pills. #}
+            {{ ((last - cur) % 9) + 1 }}
+          {% endif %}
+
+      - name: "Pill Dispenser Needs Refill"
+        unique_id: pill_dispenser_needs_refill
+        icon: mdi:tray-alert
+        state: >
+          {% set rem = states('sensor.pill_dispenser_compartments_remaining') %}
+          {% if rem in ['unknown', 'unavailable', 'none'] %}
+            unknown
+          {% else %}
+            {{ 'on' if (rem | int(99)) <= 2 else 'off' }}
+          {% endif %}
+
+# -----------------------------------------------------------------------------
+# Scripts — reusable building blocks for automations and the dashboard button.
+# -----------------------------------------------------------------------------
+script:
+  pill_dispenser_dispense_now:
+    alias: Pill Dispenser — Dispense Now
+    icon: mdi:pill
+    mode: single
+    sequence:
+      - service: button.press
+        target:
+          entity_id: button.pill_dispenser_dispense_next
+      # Give the firmware ~3s to run the dispense + verification window.
+      - delay: "00:00:03"
+      - service: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.pill_dispenser_last_dispense_at
+        data:
+          timestamp: "{{ now().timestamp() }}"
+
+  pill_dispenser_acknowledge_dose:
+    alias: Pill Dispenser — Acknowledge Dose
+    icon: mdi:check-bold
+    mode: single
+    sequence:
+      - service: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.pill_dispenser_dose_pending_ack
+
+# -----------------------------------------------------------------------------
+# Automations
+# -----------------------------------------------------------------------------
+automation:
+  # ---- Morning dose -------------------------------------------------------
+  - id: pill_dispenser_morning_dose
+    alias: Pill Dispenser — Morning Dose
+    description: Auto-dispense the morning dose at the configured time.
+    mode: single
+    trigger:
+      - platform: template
+        value_template: >
+          {{ states('sensor.time') == (states('input_datetime.pill_dispenser_morning_time')[:5]) }}
+    condition:
+      - condition: state
+        entity_id: input_boolean.pill_dispenser_morning_enabled
+        state: "on"
+      - condition: numeric_state
+        entity_id: sensor.pill_dispenser_current_compartment
+        above: 0
+    action:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.pill_dispenser_dose_pending_ack
+      - service: script.pill_dispenser_dispense_now
+      - service: notify.notify
+        data:
+          title: Pill Dispenser — Morning Dose
+          message: >
+            Dispensed compartment {{ states('sensor.pill_dispenser_current_compartment') }}.
+            Tap to confirm.
+          data:
+            tag: pill-dispenser-dose
+            actions:
+              - action: PILL_DISPENSER_ACK
+                title: Acknowledge
+
+  # ---- Evening dose -------------------------------------------------------
+  - id: pill_dispenser_evening_dose
+    alias: Pill Dispenser — Evening Dose
+    description: Optional second daily dose at the configured time.
+    mode: single
+    trigger:
+      - platform: template
+        value_template: >
+          {{ states('sensor.time') == (states('input_datetime.pill_dispenser_evening_time')[:5]) }}
+    condition:
+      - condition: state
+        entity_id: input_boolean.pill_dispenser_evening_enabled
+        state: "on"
+      - condition: numeric_state
+        entity_id: sensor.pill_dispenser_current_compartment
+        above: 0
+    action:
+      - service: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.pill_dispenser_dose_pending_ack
+      - service: script.pill_dispenser_dispense_now
+      - service: notify.notify
+        data:
+          title: Pill Dispenser — Evening Dose
+          message: >
+            Dispensed compartment {{ states('sensor.pill_dispenser_current_compartment') }}.
+            Tap to confirm.
+          data:
+            tag: pill-dispenser-dose
+            actions:
+              - action: PILL_DISPENSER_ACK
+                title: Acknowledge
+
+  # ---- Mobile-app action handler -----------------------------------------
+  - id: pill_dispenser_ack_action
+    alias: Pill Dispenser — Acknowledge from notification
+    mode: single
+    trigger:
+      - platform: event
+        event_type: mobile_app_notification_action
+        event_data:
+          action: PILL_DISPENSER_ACK
+    action:
+      - service: script.pill_dispenser_acknowledge_dose
+
+  # ---- Missed dose escalation --------------------------------------------
+  # If a dose is still pending acknowledgement 30 / 60 / 120 minutes later,
+  # escalate the alert. Cancel the moment the user acknowledges.
+  - id: pill_dispenser_missed_dose_escalation
+    alias: Pill Dispenser — Missed Dose Escalation
+    description: Escalating reminders when a dose is not acknowledged.
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: input_boolean.pill_dispenser_dose_pending_ack
+        to: "on"
+    action:
+      # First reminder at 30 min.
+      - delay: "00:30:00"
+      - if:
+          - condition: state
+            entity_id: input_boolean.pill_dispenser_dose_pending_ack
+            state: "on"
+        then:
+          - service: notify.notify
+            data:
+              title: Pill Dispenser — Reminder
+              message: "It's been 30 minutes since your dose was dispensed. Have you taken it?"
+              data:
+                tag: pill-dispenser-dose
+                actions:
+                  - action: PILL_DISPENSER_ACK
+                    title: I took it
+      # Second reminder at 60 min total.
+      - delay: "00:30:00"
+      - if:
+          - condition: state
+            entity_id: input_boolean.pill_dispenser_dose_pending_ack
+            state: "on"
+        then:
+          - service: notify.notify
+            data:
+              title: Pill Dispenser — Still pending
+              message: "It's been an hour. Please take your dose or acknowledge."
+              data:
+                tag: pill-dispenser-dose
+                priority: high
+                ttl: 0
+                actions:
+                  - action: PILL_DISPENSER_ACK
+                    title: I took it
+      # Final critical alert at 120 min total.
+      - delay: "01:00:00"
+      - if:
+          - condition: state
+            entity_id: input_boolean.pill_dispenser_dose_pending_ack
+            state: "on"
+        then:
+          - service: notify.notify
+            data:
+              title: Pill Dispenser — MISSED DOSE
+              message: "Dose was dispensed 2 hours ago and not acknowledged."
+              data:
+                tag: pill-dispenser-dose-critical
+                priority: high
+                ttl: 0
+                channel: alarm_stream
+                actions:
+                  - action: PILL_DISPENSER_ACK
+                    title: I took it
+
+  # ---- Refill reminder ---------------------------------------------------
+  - id: pill_dispenser_refill_reminder
+    alias: Pill Dispenser — Refill Reminder
+    description: Fires when 2 or fewer compartments remain.
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: sensor.pill_dispenser_needs_refill
+        to: "on"
+    action:
+      - service: notify.notify
+        data:
+          title: Pill Dispenser — Refill soon
+          message: >
+            Only {{ states('sensor.pill_dispenser_compartments_remaining') }}
+            compartments left. Time to refill.
+          data:
+            tag: pill-dispenser-refill
+
+  # ---- Pill count mismatch -----------------------------------------------
+  # The firmware publishes "OK" or "MISMATCH: got N, expected M" to
+  # sensor.pill_dispenser_last_dispense_status after every dispense. Any
+  # state change to a value that starts with MISMATCH triggers an alert.
+  - id: pill_dispenser_count_mismatch
+    alias: Pill Dispenser — Pill Count Mismatch
+    description: Alert when the IR count differs from the expected dose.
+    mode: queued
+    max: 5
+    trigger:
+      - platform: state
+        entity_id: sensor.pill_dispenser_last_dispense_status
+    condition:
+      - condition: template
+        value_template: "{{ trigger.to_state.state.startswith('MISMATCH') }}"
+    action:
+      - service: notify.notify
+        data:
+          title: Pill Dispenser — Count Mismatch
+          message: >
+            Compartment {{ states('sensor.pill_dispenser_current_compartment') }}:
+            {{ states('sensor.pill_dispenser_last_dispense_status') }}.
+            Check the device.
+          data:
+            tag: pill-dispenser-mismatch
+            priority: high
+            ttl: 0
